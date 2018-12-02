@@ -1,0 +1,149 @@
+#!/usr/bin/perl
+
+use feature qw(say state switch);
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Data::Dumper;
+use strict;
+
+# ======= 要自動開啟的 process 的設定 ============ #
+my $server_list = {
+    server => [
+        {   # === process 1
+            name => "blog", # process 名稱 自己命名
+            path => "~/blog/server", # 位置
+            cmd => "php artisan serv", # 指令
+        },
+        {   # === process 2
+            name => "cardgame",
+            path => "/var/www/html/cardgame/Server/GameServer",
+            cmd => "nodemon",
+        },
+        {   # === process 3
+            name => "simple_storage",
+            path => "/var/www/html/simple_storage",
+            cmd => "nodemon",
+        },
+        {   # === process 4
+            name => "todo_list_server",
+            path => " ~/todo_list_server",
+            cmd => "forever -c \"nodemon --exitcrash\" bin/www",
+        },
+
+    ],
+    other => [
+    ],
+};
+
+
+
+my ( $project_name, $help );
+GetOptions(
+    "name=s" => \$project_name,
+    "help" => \$help,
+);
+
+my ($session);
+
+
+
+# 此專案的名稱 - 用於開 tmux 時使用
+$project_name //= "les";
+
+$session = $project_name;
+
+if ( $help ) {
+    usage();
+    exit();
+}
+
+sub real {
+    # 如果是在 tmux 內 則不可啟動
+    return say "Error: cannot start session from within tmux." if ( system("\$TMUX") );
+
+    # 開新的 session 如果已經有的就跳過此步驟 (有的話是 0, 沒有的話是256)
+    return say "Session $session exists." if (!system("tmux has-session -t $session 2> /dev/null"));
+
+    system "tmux new-session -d -s $session";
+
+    if ( !$ARGV[0] ) {
+        for my $serv_key ( keys %$server_list ) {
+            run_server($server_list->{$serv_key});
+        }
+    } elsif ( in_list($ARGV[0], ["server", "other"]) ) {
+        run_server($server_list->{$ARGV[0]});
+    } else {
+        my $dir = getcwd();
+        my $cmd = $ARGV[0];
+        say "[run_server:" .$ARGV[0] ."] cmd : $cmd <=> $dir";
+        run_in_window($ARGV[0], $dir, $ARGV[0]);
+    }
+
+    system("tmux attach -t $project_name");
+}
+
+sub run_server {
+    my ($server_list) = @_;
+
+    my $count = 0;
+    for my $process ( @$server_list ) {
+        my ($name, $path, $cmd) = @{$process}{qw(name path cmd)};
+        say "[run_server:$name]  $cmd <=> $path";
+        run_in_window($name, $path, $cmd);
+        sleep 1;
+    }
+}
+
+sub run_in_window {
+    my ($name, $path, $cmd) = @_;
+
+    if ( !system("tmux list-windows -t $session -F '#{window_name}' | grep \"^$name\$\" >/dev/null") ) {
+        # 已經有此名稱的 window 。 0: 已經存在, 256 尚未存在
+        say "Already running: $name";
+    } else {
+        say "Starting $name ... $cmd";
+
+        # Create new window and run command.
+        system("cd $path");
+        system("tmux new-window -t $session -n $name 'cd $path ; $cmd'");
+
+        say "-------";
+    }
+}
+
+sub in_list {
+    my ($val, $list) = @_;
+    if ( 'ARRAY' eq ref $list ) {
+        return scalar grep { $val eq $_ } @$list;
+    } elsif ( 'HASH' eq ref $list ) {
+        return scalar grep { $val eq $list->{$_} } keys %$list;
+    } else {
+        return 0;
+    }
+}
+
+sub usage {
+    say "
+    >> [Usage]
+
+        初次使用請使用記事本或其他編輯器編輯
+        ```
+        my \$server_list = {
+         ....
+         }
+         ```
+         中的內容，將你想要自動執行工作的路徑、指令設定好，
+         並且為它取一個你喜歡的名字。存檔後即可使用此程式自動啟動運行。
+
+
+        [你可以自訂程序名稱 ( default: 'les' )] 使用
+    -name 或 -n '程序名稱',
+
+        [求救]
+    -h 或 -help
+
+        [tips] 你可以將此程式放置於 /usr/local/bin/ 目錄下，即可將此程式作為一般 command line 使用。
+    ";
+}
+real();

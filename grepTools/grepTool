@@ -1,0 +1,147 @@
+#!/usr/bin/perl
+
+use feature qw(say state switch);
+use Getopt::Long;
+use Cwd            qw( abs_path );
+use File::Basename;
+use Data::Dumper;
+use strict;
+
+my($type, $path , $next , $help );
+
+GetOptions("type=s", \$type, "path=s", \$path , "next=s", \$next ,"help", \$help);
+
+print "ZZ,t:$type,p:$path,n:$next,h:$help\n";
+
+if($help)
+{
+    usage();
+    exit();
+}
+
+real($ARGV[0], $type , $path ,$next);
+
+sub real
+{
+
+#會拿到四個參數
+my ($search , $fileType , $path , $grepNext) = @_;
+
+$fileType ||= 'perl,php,js,css,html,log,vue,ts,json,xml';
+$path     ||= '*';
+$grepNext ||= '';
+
+my (@command_path , $command_fileType , $command_option , $command_search , $command_grepNext);
+
+
+# fileType 目前先設定 php perl js css html log json xml
+$command_fileType = processFileType($fileType);
+
+# path 目前設定
+#   . => 當下目錄
+#   指定目錄 => 完整目錄 ex ~/Desktop/XXX/XXX
+#   指定目錄 => 非完整目錄 ex ~/Downloads/XXX/XXX
+
+# 判斷要search 的 path
+# 有幾總情況
+@command_path = processpath($path);
+
+# 設定屬性
+$command_option = '-nsrHIi';
+
+# 要搜尋的字串
+$command_search = $search;
+
+#next command
+$command_grepNext = " | grep --color=auto -si $grepNext " if($grepNext);
+
+# 產出command
+map{
+		my $cmd = creatCommand($_ , $command_fileType , $command_option , $command_search , $command_grepNext);
+		system($cmd);
+		green_say("search done");
+	}@command_path;
+# die;
+
+}
+
+sub processFileType {
+    my $fileType = shift;
+    my @types = split(',', $fileType);
+    my $str;
+    map{
+        map{
+            $str.= ' --include=\*.'.$_;
+            $str.= ' --exclude=\*.min.'.$_;
+            $str.= ' --exclude=\*.d.'.$_;
+        } split(',', fileType2fileExt($_))
+    } @types;
+    return $str;
+}
+
+sub fileType2fileExt {
+    my ($fileType) = shift;
+    my $out;
+
+    my $fileTypeMap = {
+        php =>  "php",
+        perl => "pl,pm",
+        js =>   "js",
+        css =>  "css",
+        html => "html",
+        ts =>   "ts",
+        vue =>  "vue",
+        log =>  "log",
+        json => "json",
+        xml => "xml",
+    };
+
+    $out = $fileTypeMap->{$fileType};
+
+    return $out if $out;
+}
+
+sub processpath {
+    my $path = shift;
+
+    if($path eq '.'){
+        return ('*');
+    } elsif ($path eq 'toppath') {
+        return ('~/toppath');
+    } elsif ($path eq 'toppath2') {
+        return ('~/toppath2');
+    } else {
+        return split(',',$path);
+    }
+
+}
+
+sub creatCommand {
+ my ($command_path , $command_fileType , $command_option , $command_search , $command_grepNext) = @_;
+ my $cmd = "grep $command_option '$command_search' $command_path $command_fileType $command_grepNext --color=always | cut -c1-200";
+ green_say($cmd);
+ return $cmd;
+}
+
+sub green_say {
+my ($str) = @_;
+print "\033[1;32m$str\033[m\n";
+}
+
+sub usage
+{
+    print <<".";
+
+        [ -p / --path] path 目前設定
+            \. => 當下目錄
+            指定目錄 => 完整目錄 ex ~/Desktop/XXX/XXX
+            指定目錄 => 非完整目錄 ex ~/Downloads/XXX/XXX
+
+        [ -n / --next ] 想查詢的下一個關鍵字
+            可以在查找完一個關鍵字後，以此結果為立基查找下一個關鍵字.
+
+        [ -t / --type ] 檔案類型
+            (可以只查找特定的檔案類型)
+            \. => 目前設定可查找的檔案類型為：php perl js css html log vue ts json xml
+.
+}

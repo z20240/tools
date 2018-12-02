@@ -1,0 +1,289 @@
+#!/usr/bin/perl
+
+use feature qw(say state switch);
+
+use List::Util qw(reduce any all none max  min minstr sum);
+use Scalar::Util qw(looks_like_number);
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Data::Dumper;
+use Term::ANSIColor qw(:constants);
+
+use strict;
+use MongoDB;
+use Net::EmptyPort qw(check_port);
+use JSON qw(encode_json decode_json);
+
+my ($db_name, $collection_name) = qw(statt-tt0 g_sw_info);
+my ($host, $port) = qw(localhost 27017);
+my ($cfg_path, $cfg_file_name, $cfg_file_subname) = qw(../statt_server/server/config/ cfg-swApp .js); # cfg_path 之後上 239 改成 Config_Backup
+my ($copy_config_name, $copy_config_subname) = qw(CopyConfig .sh);
+my ($statt_service_name, $statt_service_subname) = qw(statt_service .sh);
+
+my $channel_comp_map;
+
+use constant {
+    TRUE => 1,
+    FALSE => 0,
+};
+
+
+=take
+    @desc 檢查參數是否合法
+    @param {number[]} channels
+=cut
+sub _checkCorrectInput { #{{{
+    my (@channels) = @_;
+
+    return FALSE unless scalar @channels;
+    for (@channels) {
+         return FALSE unless looks_like_number($_);
+    }
+
+    return TRUE;
+} #}}}
+
+
+=take
+    @desc 依照指定數量從指定port開始找尋符合數量的port
+    @param {number} port
+    @param {number} number
+=cut
+sub _getCanUsePorts { #{{{
+    my ($port, $number) = @_;
+
+    print YELLOW, "\n ... 找尋適合的 port number ... \n", , RESET;
+
+    my @ports;
+    my ($find_num, $cir_count) = (scalar @ports, 0);
+
+    while ( $find_num < $number && $cir_count < 20000 ) {
+        print "      checking port $port: ", check_port($port) ? "已被使用" : "可以使用", "\n";
+        push @ports, $port if (!check_port $port);
+
+        $find_num = scalar @ports;
+        $port++;
+        $cir_count++;
+    }
+    return @ports;
+} # }}}
+
+sub _convertChannelHashList { #{{{
+    my ($comp_id, $channels, $ports) = @_;
+
+    my $channel_list;
+
+    print YELLOW, "\n ... 產生 sw_info ... \n", RESET;
+
+    for (my $i = 0 ; $i < scalar @$channels; $i++) {
+        push @$channel_list, {
+            compId      => int $comp_id,
+            channelId   => int $channels->[$i],
+            port        => int $ports->[$i],
+            host        => $host,
+        };
+
+
+        $comp_id++;
+    }
+    return $channel_list;
+} #}}}
+
+sub newSwInfo { #{{{
+    my (@channels) = @_;
+
+    my $data = undef;
+
+    my $client = MongoDB::MongoClient->new( host => $host, port => $port );
+
+    my $db = $client->get_database( $db_name );
+
+    my $collection = $db->get_collection( $collection_name );
+
+    my $datas = $collection->find;
+
+    my ($max_comp_id, $max_port) = (0, 0);
+    while (my $d = $datas->next ) {
+        $max_comp_id = max($max_comp_id, $d->{compId});
+        $max_port    = max($max_port, $d->{port});
+    }
+
+    $max_comp_id += 1; # 找出下一個 compId
+    $max_port    += 1; # 找出下一個 port
+
+    my @ports = _getCanUsePorts($max_port, scalar @channels);
+
+    print "\n    本次總共有 " . scalar @channels . " 個渠道號, 已找到 " . scalar @ports . " 個 可用 port \n";
+
+    return (FALSE, "找不到相應數量且可用的 port") if scalar @ports != scalar @channels;
+
+    my $channel_hashlist = _convertChannelHashList($max_comp_id, \@channels, \@ports);
+
+    print "\n產生 sw_info : \n";
+    print (join ", \n", map { encode_json( $_ ) } @$channel_hashlist), "\n";
+    print "\n";
+
+    $collection->insert_many($channel_hashlist);
+
+    return (TRUE, $channel_hashlist);
+} #}}}
+
+
+
+sub _readFile {
+    my ($path, $file_name, $file_subname) = @_;
+
+    open(my $fh, "$path$file_name$file_subname") or die "Could not open file '$file_name' $!";
+
+    my $contents;
+    while (my $row = <$fh>) {
+        chomp $row;
+        push @$contents, $row;
+    }
+
+    return $contents;
+}
+
+sub _writeFile {
+    my ($contents, $channelObj, $path, $file_name, $file_subname) = @_;
+
+    open(FHW, ">$path$file_name$channelObj->{channelId}$file_subname") or die "Can't open $path$file_name$channelObj->{channelId}$file_subname ! $!";
+
+    print YELLOW, "\n ... 產生 $path$file_name$file_subname ... \n\n", RESET;
+
+    for my $line ( @$contents ) {
+        if ( $line =~ /(.*compId:)\s*[0-9]+/ ) {
+            print FHW "$1 $channelObj->{compId},\n";
+        } else {
+            print FHW "$line\n";
+        }
+    }
+
+    close( FHW );
+}
+
+sub _modifyFile {
+    my ($contents, $channel_hashlist, $path, $file_name, $file_subname) = @_;
+
+    open(FHW, ">$path$file_name$file_subname") or die "Can't open $path$file_name$file_subname ! $!";
+
+    print YELLOW, "\n ... 寫入 $path$file_name$file_subname 中 ... \n\n", RESET;
+
+    for (my $i = 0 ; $i < scalar @$contents ; $i++) {
+        my ($line, $next_line) = ($contents->[$i], $contents->[$i+1]);
+
+
+        if ( $file_name eq "CopyConfig" ) {
+
+            # 直接印出每一行
+            print FHW $line, "\n";
+
+            # 若是下一行已經不是 cp -f swApp.js 的話，就插入我們要新增的
+            if ( $line =~ /(.*cp\s+-f)\s+(sw\/app\/)(swApp)(\.js)/ && $next_line !~ /.*cp\s+-f\s+sw\/app\/swApp\.js/ ) {
+                for my $channelObj ( @$channel_hashlist ) {
+                    print "        $1 $2$3$4 $2$3$channelObj->{channelId}$4\n";
+                    print FHW "$1 $2$3$4 $2$3$channelObj->{channelId}$4\n";
+                }
+            }
+
+        } elsif ( $file_name eq "statt_service" ) {
+
+            # 如果當前 line 是 pm2 delete ... swApp 的話，就在後面加上我們要新增的 swApp
+            $line .= ( " " . ( join " ", map { "swApp$_->{channelId}" } @$channel_hashlist ) ) if ( $line =~ /(.*pm2 delete .* swApp.*)/ );
+
+            # 直接印出每一行
+            print FHW $line, "\n";
+
+            # 若是下一行已經不是 pm2 start swApp  的話，就插入我們要新增的
+            if ( $line =~ /(.*pm2\s+start)\s+(swApp)[0-9]+(\.js)/ && $next_line !~ /.*pm2\s+start\s+swApp[0-9]+\.js/ ) {
+                for my $channelObj ( @$channel_hashlist ) {
+                    print "        $1 $2$channelObj->{channelId}$3\n";
+                    print FHW "$1 $2$channelObj->{channelId}$3\n";
+                }
+            }
+
+        }
+
+    }
+
+    print "\n";
+
+    close( FHW );
+}
+
+sub newSwConfig { #{{{
+    my ($channels, $channel_hashlist) = @_;
+
+    my $contents = _readFile($cfg_path, $cfg_file_name, $cfg_file_subname);
+
+    for my $channelObj ( @$channel_hashlist ) {
+
+        _writeFile( $contents, $channelObj, $cfg_path, $cfg_file_name, $cfg_file_subname );
+    }
+
+    return (TRUE, undef);
+} #}}}
+
+
+sub  modifyFiles {
+    my ( $channels, $channel_hashlist, $file_name, $file_subname ) = @_;
+
+    my $contents = _readFile("", $file_name, $file_subname);
+
+    _modifyFile( $contents, $channel_hashlist, "", $file_name, $file_subname );
+
+
+    return (TRUE, undef);
+}
+
+sub main {
+    my (@channels) = @_;
+
+    my ($result, $data);
+    my $channel_hashlist;
+
+    return print RED, "錯誤的渠道號輸入", RESET unless  _checkCorrectInput(@channels);
+
+    # step 1. 新增g_sw_info的表單
+    ($result, $data) = newSwInfo(@channels);
+    return print RED, "\n\n[錯誤！] $data\n\n", RESET unless $result;
+
+    $channel_hashlist = $data;
+
+    # step 2. 新增 sw config 檔案
+    ($result, $data) = newSwConfig(\@channels, $channel_hashlist);
+    return print RED, "\n\n[錯誤！] 產生檔案失敗！(step 2. newSwConfig ... ）\n\n" , RESET unless $result;
+
+    # step 3. 自動修改 bill 大的腳本 (CopyConfig.sh)
+    ($result, $data) = modifyFiles(\@channels, $channel_hashlist, $copy_config_name, $copy_config_subname );
+    return print RED, "\n\n[錯誤！] 寫入檔案失敗！$data （step 3. modifyFiles ... ）\n\n", RESET unless $result;
+
+    # step 4. 自動修改 bill 大的腳本2 (statt_service.sh)
+    ($result, $data) = modifyFiles(\@channels, $channel_hashlist, $statt_service_name, $statt_service_subname);
+
+
+    # step 5. 執行 CopyConfig.
+    print YELLOW, "\n\n ... 執行 CopyConfig.sh ... \n\n", RESET;
+    system("sh $copy_config_name$copy_config_subname");
+
+    #step 6. 執行 ./statt_service.sh pm2start
+    print YELLOW, "\n\n ... ./statt_service.sh pm2start ... \n\n", RESET;
+    exec "./statt_service.sh pm2start";
+
+    print GREEN, "\n ^^^^^^^^^^^^^^^^^^^^^^^^^^^ \n", RESET;
+    print GREEN, " =   Script Execute Done.  =", RESET;
+    print GREEN, "\n ^^^^^^^^^^^^^^^^^^^^^^^^^^^ \n", RESET;
+
+}
+
+if ($ARGV[0] eq '-h' || $ARGV[0] eq '--help') {
+    print "[Usage]
+        於此指令後方直接加上要新增的渠道號即可（可支援同時創建多個渠道）
+
+        ex. ./auto_new_sw channelId1 channelId2 channelId3 ... 依此類堆
+    ";
+    exit;
+}
+
+main(@ARGV);
